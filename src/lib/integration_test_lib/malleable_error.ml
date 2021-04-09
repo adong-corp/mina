@@ -31,8 +31,8 @@ module Hard_fail = struct
     {hard_errors; soft_errors= Error_accumulator.empty}
 
   let contextualize context {hard_errors; soft_errors} =
-    { hard_errors= Error_accumulator.contextualize context hard_errors
-    ; soft_errors= Error_accumulator.contextualize context soft_errors }
+    { hard_errors= Error_accumulator.contextualize' context hard_errors ~time_of_error:Test_error.occurrence_time_of_internal_error
+    ; soft_errors= Error_accumulator.contextualize' context soft_errors ~time_of_error:Test_error.occurrence_time_of_internal_error }
 end
 
 module Result_accumulator = struct
@@ -49,7 +49,7 @@ module Result_accumulator = struct
 
   let contextualize context acc =
     { acc with
-      soft_errors= Error_accumulator.contextualize context acc.soft_errors }
+      soft_errors= Error_accumulator.contextualize' context acc.soft_errors ~time_of_error:Test_error.occurrence_time_of_internal_error }
 end
 
 type 'a t = ('a Result_accumulator.t, Hard_fail.t) Deferred.Result.t

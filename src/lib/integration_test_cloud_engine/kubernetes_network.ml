@@ -274,7 +274,7 @@ module Node = struct
     let peers = (query_result_obj#daemonStatus)#peers |> Array.to_list in
     let peer_ids = List.map peers ~f:(fun peer -> peer#peerId) in
     [%log info]
-      "get_peer_id, result of graphql querry (self_id,[peers]) (%s,%s)" self_id
+      "get_peer_id, result of graphql query (self_id,[peers]) (%s,%s)" self_id
       (String.concat ~sep:" " peer_ids) ;
     return (self_id, peer_ids)
 

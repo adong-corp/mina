@@ -87,6 +87,31 @@ let report_test_errors error_set =
     let sort_test_errors =
       List.sort ~compare:(fun (_, a) (_, b) -> Test_error.compare_time a b)
     in
+
+
+    (* NEXT STEP: simplify and split remote vs. internal errors *)
+    let log_errors = Error_accumulator.get_context_errors errors "logs" in
+
+
+    Error_accumulator.iter_contexts errors ~f:(fun context errors ->
+      match (context, errors) with
+      (* skip logs, as we report them separately *)
+      | (Some "logs", _)
+      | (None, []) -> ()
+      (* report successful contexts *)
+      | (Some context, []) ->
+          Printf.eprintf "%s✓ %s%s" Bash_colors.green context Bash_color.none
+      (* report context warnings and errors *)
+      | (Some context, errors) ->
+          let (color, category_prefix) =
+            match max_severity errors with
+            | `Soft -> (Bash_colors.yellow, "-")
+            | `Hard -> (Bash_colors.red, "×")
+          in
+          let context_severity = max_severity errors in
+          Print.eprintf "%s%s %s%s" (color_of_severity context_severity) (context_prefix context_severity) context Bash_colors.none ;
+          List.iter errors ~f:(fun (severity, error) ->
+            Printf.eprintf "    %s[%s]%s%s" (color_of_severity severity) (Time.to_string @@ Test_error.occurrence_time error) (Test_error.to_string error) Bash_colors.none)) ;
     Print.eprintf "- Top Level\n" ;
     errors.from_current_context |> sort_test_errors
     |> List.iter ~f:display_error ;

@@ -34,6 +34,8 @@ let to_string = function
         (Time.to_string occurrence_time)
         (Error.to_string_hum error)
 
+let occurrence_time_of_internal_error {occurrence_time; _} = occurrence_time
+
 let occurrence_time = function
   | Remote_error {error_message; _} ->
       error_message.timestamp
@@ -42,17 +44,48 @@ let occurrence_time = function
 
 let compare_time a b = Time.compare (occurrence_time a) (occurrence_time b)
 
-(* TODO: make polymorphic over error type *)
+module TimeMap = Map.Make_using_comparator (struct
+  include Time
+
+  let sexp_of_t time =
+    time
+    |> Time.to_span_since_epoch
+    |> Time.Span.to_ns
+    |> Float.sexp_of_t
+
+  let t_of_sexp sexp =
+    sexp
+    |> Float.t_of_sexp
+    |> Time.Span.of_ns
+    |> Time.of_span_since_epoch
+end)
+
 (* currently a flat set of contexts mapped to errors, but perhaps a tree (for nested contexts) is better *)
 module Error_accumulator = struct
+  (* THOUGHT: every error needs a time *)
+  (* store errors per context in a map indexed by time; will solve a lot of problems *)
+
+  (* TODO: UPDATEME *)
+  (** An error accumulator accumulates and organizes errors based on contexts.
+   *  Errors can be accumulated within an unspecified context, and can then
+   *  later be upgraded into a specific context. The error accumulator tracks
+   *  an ordered set of contexts, ordered by the time at which the context was 
+   *  introduced into the accumulator. For performance reasons, these contexts
+   *  are stored from most recent to least recent introduction.
+   *
+   *  INVARIANT: List.for_all (String.Map.keys contextualized_errors) (List.mem contexts)
+   *)
+
   type 'error t =
     { from_current_context: 'error list
-    ; contextualized_errors: 'error list String.Map.t }
+    ; contextualized_errors: 'error list TimeMap.t String.Map.t }
   [@@deriving eq, sexp_of, compare]
 
-  let record_errors map context errors =
+  let record_errors map context new_errors ~time_of_error =
     String.Map.update map context ~f:(fun errors_opt ->
-        errors @ Option.value errors_opt ~default:[] )
+      let errors = Option.value errors_opt ~default:TimeMap.empty in
+      List.fold new_errors ~init:errors ~f:(fun acc error ->
+        TimeMap.add_multi acc ~key:(time_of_error error) ~data:error))
 
   let empty =
     {from_current_context= []; contextualized_errors= String.Map.empty}
@@ -62,20 +95,24 @@ module Error_accumulator = struct
 
   let all_errors {from_current_context; contextualized_errors} =
     from_current_context
-    @ List.bind (String.Map.to_alist contextualized_errors) ~f:snd
+    @ List.concat (List.bind (String.Map.data contextualized_errors) ~f:TimeMap.data)
 
-  let contextualize context {from_current_context; contextualized_errors} =
+  let contextualize' context {from_current_context; contextualized_errors} ~time_of_error =
     { empty with
       contextualized_errors=
-        record_errors contextualized_errors context from_current_context }
+        record_errors contextualized_errors context from_current_context ~time_of_error }
+
+  let contextualize = contextualize' ~time_of_error:occurrence_time
 
   let singleton x = {empty with from_current_context= [x]}
 
   let of_context_free_list ls = {empty with from_current_context= ls}
 
-  let of_contextualized_list context ls =
+  let of_contextualized_list' context ls ~time_of_error =
     { empty with
-      contextualized_errors= record_errors String.Map.empty context ls }
+      contextualized_errors= record_errors String.Map.empty context ls ~time_of_error }
+
+  let of_contextualized_list = of_contextualized_list' ~time_of_error:occurrence_time
 
   let add t error =
     {t with from_current_context= error :: t.from_current_context}
@@ -83,15 +120,49 @@ module Error_accumulator = struct
   let map {from_current_context; contextualized_errors} ~f =
     { from_current_context= List.map from_current_context ~f
     ; contextualized_errors=
-        String.Map.map contextualized_errors ~f:(List.map ~f) }
+        String.Map.map contextualized_errors ~f:(TimeMap.map ~f:(List.map ~f)) }
 
-  let merge (a : 'e t) (b : 'e t) : 'e t =
+  let iter_contexts {from_current_context; contextualized_errors} ~f =
+    let contexts_by_time =
+      contextualized_errors
+      |> String.Map.to_alist
+      |> List.map ~f:(fun (ctx, errors) ->
+          let earliest_error_time =
+            errors
+            |> TimeMap.keys
+            |> List.min_elt ~compare:Time.compare
+               (* there should always be at least one error in these lists *)
+            |> Option.value_exn
+          in
+          (earliest_error_time, ctx))
+      |> TimeMap.of_alist_exn
+    in
+    let sorted_errors_by_context =
+      String.Map.map contextualized_errors ~f:(fun errors_by_time ->
+        List.concat (TimeMap.data errors_by_time))
+    in
+    f None from_current_context ;
+    TimeMap.iter contexts_by_time ~f:(fun context ->
+      f (Some context) (String.Map.find_exn sorted_errors_by_context context))
+
+  let merge a b =
     let from_current_context =
       a.from_current_context @ b.from_current_context
     in
     let contextualized_errors =
-      String.Map.fold a.contextualized_errors ~init:b.contextualized_errors
-        ~f:(fun ~key ~data m -> record_errors m key data)
+      let merge_maps
+          (type a key comparator_witness)
+          (map_a : (key, a, comparator_witness) Map.t)
+          (map_b : (key, a, comparator_witness) Map.t)
+          ~(resolve_conflict: a -> a -> a)
+        : (key, a, comparator_witness) Map.t
+        = Map.fold map_b ~init:map_a ~f:(fun ~key ~data acc ->
+            Map.update acc key ~f:(function
+              | None -> data
+              | Some data' -> resolve_conflict data' data))
+      in
+      merge_maps a.contextualized_errors b.contextualized_errors
+        ~resolve_conflict:(merge_maps ~resolve_conflict:(@))
     in
     {from_current_context; contextualized_errors}
 
@@ -102,10 +173,18 @@ module Error_accumulator = struct
       List.partition_tf from_current_context ~f
     in
     let contextualized_errors_a, contextualized_errors_b =
-      String.Map.fold contextualized_errors
-        ~init:(String.Map.empty, String.Map.empty) ~f:(fun ~key ~data (a, b) ->
-          let a_data, b_data = List.partition_tf data ~f in
-          (record_errors a key a_data, record_errors b key b_data) )
+      let partition_map
+          (type key a w)
+          (cmp : (key, w) Map.comparator)
+          (map : (key, a, w) Map.t)
+          ~(f : (a -> a * a))
+        : (key, a, w) Map.t * (key, a, w) Map.t
+        = Map.fold map ~init:(Map.empty cmp, Map.empty cmp) ~f:(fun ~key ~data (left, right) ->
+            let (l, r) = f data in
+            (Map.add_exn left ~key ~data:l, Map.add_exn right ~key ~data:r))
+      in
+      partition_map (module String) contextualized_errors ~f:(fun errors_by_time ->
+        partition_map (module Time) errors_by_time ~f:(List.partition_tf ~f))
     in
     let a =
       { from_current_context= from_current_context_a

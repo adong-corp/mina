@@ -50,7 +50,9 @@ module Make (Inputs : Intf.Test.Inputs_intf) = struct
     let open Network in
     let open Malleable_error.Let_syntax in
     let logger = Logger.create () in
-    let all_nodes = Network.all_nodes network in
+    (* TEMP: until we fix the seed graphql port, we will only check peers for block producers *)
+    (* let all_nodes = Network.all_nodes network in *)
+    let all_nodes = Network.block_producers network in
     let[@warning "-8"] [node_a; node_b; node_c] =
       Network.block_producers network
     in
@@ -71,7 +73,7 @@ module Make (Inputs : Intf.Test.Inputs_intf) = struct
       section "short bootstrap"
         (let%bind () = Node.stop node_c in
          let%bind _ = wait_for t (Wait_condition.blocks_to_be_produced 1) in
-         let%bind () = Node.start ~fresh_state:true node_b in
+         let%bind () = Node.start ~fresh_state:true node_c in
          let%bind () = wait_for t (Wait_condition.node_to_initialize node_c) in
          wait_for t
            ( Wait_condition.nodes_to_synchronize [node_a; node_b; node_c]
