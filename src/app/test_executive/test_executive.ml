@@ -50,109 +50,154 @@ let tests : test list =
   ; ("archive-node", (module Archive_node_test.Make : Intf.Test.Functor_intf))
   ; ("common-prefix", (module Common_prefix.Make : Intf.Test.Functor_intf)) ]
 
-let report_test_errors error_set =
+let report_test_errors ~log_error_set ~internal_error_set =
   (* TODO: we should be able to show which sections passed as well *)
   let open Test_error in
   let open Test_error.Set in
-  let errors =
+  let color_eprintf color =
+    Printf.ksprintf (fun s -> Print.eprintf "%s%s%s" color s Bash_colors.none)
+  in
+  let color_of_severity = function
+    | `None ->
+        Bash_colors.green
+    | `Soft ->
+        Bash_colors.yellow
+    | `Hard ->
+        Bash_colors.red
+  in
+  let category_prefix_of_severity = function
+    | `None ->
+        "✓"
+    | `Soft ->
+        "-"
+    | `Hard ->
+        "×"
+  in
+  let print_category_header severity =
+    Printf.ksprintf
+      (color_eprintf
+         (color_of_severity severity)
+         "%s %s\n"
+         (category_prefix_of_severity severity))
+  in
+  let max_sev a b =
+    match (a, b) with
+    | `Hard, _ | _, `Hard ->
+        `Hard
+    | `Soft, _ | _, `Soft ->
+        `Soft
+    | _ ->
+        `None
+  in
+  let max_severity_of_list severities =
+    List.fold severities ~init:`None ~f:max_sev
+  in
+  let combine_errors error_set =
     Error_accumulator.combine
       [ Error_accumulator.map error_set.soft_errors ~f:(fun err -> (`Soft, err))
       ; Error_accumulator.map error_set.hard_errors ~f:(fun err -> (`Hard, err))
       ]
   in
-  let num_internal_errors =
-    errors |> Error_accumulator.all_errors
-    |> List.filter ~f:(function _, Internal_error _ -> true | _ -> false)
-    |> List.length
+  let internal_errors = combine_errors internal_error_set in
+  let internal_errors_severity = max_severity internal_error_set in
+  let log_errors = combine_errors log_error_set in
+  let log_errors_severity = max_severity log_error_set in
+  let report_log_errors log_type =
+    color_eprintf
+      (color_of_severity log_errors_severity)
+      "=== Log %ss ===\n" log_type ;
+    Error_accumulator.iter_contexts log_errors ~f:(fun node_id log_errors ->
+        color_eprintf Bash_colors.light_magenta "    %s:\n" node_id ;
+        List.iter log_errors ~f:(fun (severity, {error_message; _}) ->
+            color_eprintf
+              (color_of_severity severity)
+              "        [%s] %s\n"
+              (Time.to_string error_message.timestamp)
+              (Yojson.Safe.to_string (Logger.Message.to_yojson error_message))
+        ) ;
+        Print.eprintf "\n" )
   in
-  let display_error (severity, error) =
-    let color =
-      match severity with
-      | `Soft ->
-          Bash_colors.yellow
-      | `Hard ->
-          Bash_colors.red
-    in
-    Print.eprintf "  - %s%s%s\n" color (to_string error) Bash_colors.none
+  (* check invariants *)
+  if List.length log_errors.from_current_context > 0 then
+    failwith "all error logs should be contextualized by node id" ;
+  (* report log errors *)
+  Print.eprintf "\n" ;
+  ( match log_errors_severity with
+  | `None ->
+      ()
+  | `Soft ->
+      report_log_errors "Warning"
+  | `Hard ->
+      report_log_errors "Error" ) ;
+  (* report contextualized internal errors *)
+  color_eprintf Bash_colors.magenta "=== Test Results ===\n" ;
+  Error_accumulator.iter_contexts internal_errors ~f:(fun context errors ->
+      print_category_header
+        (max_severity_of_list (List.map errors ~f:fst))
+        "%s" context ;
+      List.iter errors ~f:(fun (severity, {occurrence_time; error}) ->
+          color_eprintf
+            (color_of_severity severity)
+            "    [%s] %s\n"
+            (Time.to_string occurrence_time)
+            (Error.to_string_hum error) ) ) ;
+  (* report non-contextualized internal errors *)
+  List.iter internal_errors.from_current_context
+    ~f:(fun (severity, {occurrence_time; error}) ->
+      color_eprintf
+        (color_of_severity severity)
+        "[%s] %s\n"
+        (Time.to_string occurrence_time)
+        (Error.to_string_hum error) ) ;
+  (* determine if test is passed/failed and exit accordingly *)
+  let test_failed =
+    match (log_errors_severity, internal_errors_severity) with
+    | _, `Hard | _, `Soft ->
+        true
+    (* TODO: re-enable log error checks after libp2p logs are cleaned up *)
+    | `Hard, _ | `Soft, _ | `None, `None ->
+        false
   in
-  if Error_accumulator.error_count errors > 0 then (
-    Print.eprintf "%s=== Errors encountered while running tests ===%s\n"
-      Bash_colors.red Bash_colors.none ;
-    (* ✓ peers are well connected at start
-     * × peers are well connected at end
-     *     INTERNAL ERROR: ...
-     *     REMOTE ERROR (block-producer-1): ...
-     *)
-    (* error contexts should have defined order... *)
-    let sort_test_errors =
-      List.sort ~compare:(fun (_, a) (_, b) -> Test_error.compare_time a b)
-    in
-
-
-    (* NEXT STEP: simplify and split remote vs. internal errors *)
-    let log_errors = Error_accumulator.get_context_errors errors "logs" in
-
-
-    Error_accumulator.iter_contexts errors ~f:(fun context errors ->
-      match (context, errors) with
-      (* skip logs, as we report them separately *)
-      | (Some "logs", _)
-      | (None, []) -> ()
-      (* report successful contexts *)
-      | (Some context, []) ->
-          Printf.eprintf "%s✓ %s%s" Bash_colors.green context Bash_color.none
-      (* report context warnings and errors *)
-      | (Some context, errors) ->
-          let (color, category_prefix) =
-            match max_severity errors with
-            | `Soft -> (Bash_colors.yellow, "-")
-            | `Hard -> (Bash_colors.red, "×")
-          in
-          let context_severity = max_severity errors in
-          Print.eprintf "%s%s %s%s" (color_of_severity context_severity) (context_prefix context_severity) context Bash_colors.none ;
-          List.iter errors ~f:(fun (severity, error) ->
-            Printf.eprintf "    %s[%s]%s%s" (color_of_severity severity) (Time.to_string @@ Test_error.occurrence_time error) (Test_error.to_string error) Bash_colors.none)) ;
-    Print.eprintf "- Top Level\n" ;
-    errors.from_current_context |> sort_test_errors
-    |> List.iter ~f:display_error ;
-    String.Map.iteri errors.contextualized_errors
-      ~f:(fun ~key:context ~data:context_errors ->
-        Print.eprintf "- %s\n" context ;
-        context_errors |> sort_test_errors |> List.iter ~f:display_error ) ) ;
-  (* TODO: re-enable error check after libp2p logs are cleaned up *)
-  (* if Error_accumulator.error_count errors > 0 || num_missing_events > 0 then exit 1 else Deferred.unit *)
-  if num_internal_errors > 0 then exit 1 else Deferred.unit
+  Print.eprintf "\n" ;
+  if test_failed then (
+    color_eprintf Bash_colors.red
+      "The test has failed. See the above errors for details.\n\n" ;
+    return false )
+  else (
+    color_eprintf Bash_colors.green "The test has completed successfully.\n\n" ;
+    return true )
 
 (* TODO: refactor cleanup system (smells like a monad for composing linear resources would help a lot) *)
 
-let dispatch_cleanup ~logger ~init_cleanup_func ~network_cleanup_func
+let dispatch_cleanup ~logger ~pause_cleanup_func ~network_cleanup_func
     ~log_engine_cleanup_func ~lift_accumulated_errors_func ~net_manager_ref
     ~log_engine_ref ~network_state_writer_ref ~cleanup_deferred_ref
     ~exit_reason ~test_result : unit Deferred.t =
   let cleanup () : unit Deferred.t =
-    let%bind () = init_cleanup_func () in
     let%bind log_engine_cleanup_result =
       Option.value_map !log_engine_ref
         ~default:(Deferred.Or_error.return ())
         ~f:log_engine_cleanup_func
     in
+    Option.value_map !network_state_writer_ref ~default:()
+      ~f:Broadcast_pipe.Writer.close ;
+    let%bind test_error_set =
+      Malleable_error.lift_error_set_unit test_result
+    in
+    let log_error_set = lift_accumulated_errors_func () in
+    let internal_error_set =
+      let open Test_error.Set in
+      combine [test_error_set; of_hard_or_error log_engine_cleanup_result]
+    in
+    let%bind test_was_successful =
+      report_test_errors ~log_error_set ~internal_error_set
+    in
+    let%bind () = pause_cleanup_func () in
     let%bind () =
       Option.value_map !net_manager_ref ~default:Deferred.unit
         ~f:network_cleanup_func
     in
-    let%bind test_error_set =
-      Malleable_error.lift_error_set_unit test_result
-    in
-    Option.value_map !network_state_writer_ref ~default:()
-      ~f:Broadcast_pipe.Writer.close ;
-    let errors =
-      let open Test_error.Set in
-      combine
-        [ lift_accumulated_errors_func ()
-        ; test_error_set
-        ; of_hard_or_error log_engine_cleanup_result ]
-    in
-    report_test_errors errors
+    if not test_was_successful then exit 1 else Deferred.unit
   in
   match !cleanup_deferred_ref with
   | Some deferred ->
@@ -211,16 +256,16 @@ let main inputs =
   let network_state_writer_ref = ref None in
   let cleanup_deferred_ref = ref None in
   let f_dispatch_cleanup =
-    let init_cleanup_func () =
+    let pause_cleanup_func () =
       if inputs.debug then
         Util.prompt_continue "Pausing cleanup. Enter [y/Y] to continue: "
       else Deferred.unit
     in
     let lift_accumulated_errors_func () =
       Option.value_map !error_accumulator_ref ~default:Test_error.Set.empty
-        ~f:Dsl.lift_accumulated_errors
+        ~f:Dsl.lift_accumulated_log_errors
     in
-    dispatch_cleanup ~logger ~init_cleanup_func
+    dispatch_cleanup ~logger ~pause_cleanup_func
       ~network_cleanup_func:Engine.Network_manager.cleanup
       ~log_engine_cleanup_func:Engine.Log_engine.destroy
       ~lift_accumulated_errors_func ~net_manager_ref ~log_engine_ref

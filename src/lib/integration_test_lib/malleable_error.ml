@@ -31,8 +31,12 @@ module Hard_fail = struct
     {hard_errors; soft_errors= Error_accumulator.empty}
 
   let contextualize context {hard_errors; soft_errors} =
-    { hard_errors= Error_accumulator.contextualize' context hard_errors ~time_of_error:Test_error.occurrence_time_of_internal_error
-    ; soft_errors= Error_accumulator.contextualize' context soft_errors ~time_of_error:Test_error.occurrence_time_of_internal_error }
+    { hard_errors=
+        Error_accumulator.contextualize' context hard_errors
+          ~time_of_error:Test_error.occurrence_time
+    ; soft_errors=
+        Error_accumulator.contextualize' context soft_errors
+          ~time_of_error:Test_error.occurrence_time }
 end
 
 module Result_accumulator = struct
@@ -49,7 +53,9 @@ module Result_accumulator = struct
 
   let contextualize context acc =
     { acc with
-      soft_errors= Error_accumulator.contextualize' context acc.soft_errors ~time_of_error:Test_error.occurrence_time_of_internal_error }
+      soft_errors=
+        Error_accumulator.contextualize' context acc.soft_errors
+          ~time_of_error:Test_error.occurrence_time }
 end
 
 type 'a t = ('a Result_accumulator.t, Hard_fail.t) Deferred.Result.t
@@ -86,12 +92,12 @@ include T
 let lift = Deferred.bind ~f:return
 
 let soft_error value error =
-  error |> Test_error.raw_internal_error |> Error_accumulator.singleton
+  error |> Test_error.internal_error |> Error_accumulator.singleton
   |> Result_accumulator.create value
   |> Result.return |> Deferred.return
 
 let hard_error error =
-  error |> Test_error.raw_internal_error |> Error_accumulator.singleton
+  error |> Test_error.internal_error |> Error_accumulator.singleton
   |> Hard_fail.of_hard_errors |> Result.fail |> Deferred.return
 
 let contextualize context m =
@@ -136,24 +142,21 @@ let combine_errors (malleable_errors : 'a t list) : 'a list t =
   List.rev values
 
 let lift_error_set (type a) (m : a t) :
-    (a * Test_error.Set.t, Test_error.Set.t) Deferred.Result.t =
+    ( a * Test_error.internal_error Test_error.Set.t
+    , Test_error.internal_error Test_error.Set.t )
+    Deferred.Result.t =
   let open Deferred.Let_syntax in
-  let internal_error_set hard_errors soft_errors : Test_error.Set.t =
-    { hard_errors=
-        Error_accumulator.map hard_errors ~f:Test_error.internal_error_from_raw
-    ; soft_errors=
-        Error_accumulator.map soft_errors ~f:Test_error.internal_error_from_raw
-    }
+  let error_set hard_errors soft_errors =
+    {Test_error.Set.hard_errors; soft_errors}
   in
   match%map m with
   | Ok {computation_result; soft_errors} ->
-      Ok
-        ( computation_result
-        , internal_error_set Error_accumulator.empty soft_errors )
+      Ok (computation_result, error_set Error_accumulator.empty soft_errors)
   | Error {hard_errors; soft_errors} ->
-      Error (internal_error_set hard_errors soft_errors)
+      Error (error_set hard_errors soft_errors)
 
-let lift_error_set_unit (m : unit t) : Test_error.Set.t Deferred.t =
+let lift_error_set_unit (m : unit t) :
+    Test_error.internal_error Test_error.Set.t Deferred.t =
   let open Deferred.Let_syntax in
   match%map lift_error_set m with
   | Ok ((), errors) ->
@@ -281,7 +284,7 @@ let%test_module "malleable error unit tests" =
           let expected =
             let errors =
               Base.List.map ["a"; "b"]
-                ~f:(Fn.compose Test_error.raw_internal_error Error.of_string)
+                ~f:(Fn.compose Test_error.internal_error Error.of_string)
             in
             Result.return
               { Result_accumulator.computation_result= "123"
@@ -304,7 +307,7 @@ let%test_module "malleable error unit tests" =
             Result.fail
               { Hard_fail.hard_errors=
                   Error_accumulator.singleton
-                    (Test_error.raw_internal_error (Error.of_string "xyz"))
+                    (Test_error.internal_error (Error.of_string "xyz"))
               ; soft_errors= Error_accumulator.empty }
           in
           [%test_eq: string inner] ~equal:(equal_inner String.equal) actual
@@ -324,10 +327,10 @@ let%test_module "malleable error unit tests" =
             Result.fail
               { Hard_fail.hard_errors=
                   Error_accumulator.singleton
-                    (Test_error.raw_internal_error (Error.of_string "xyz"))
+                    (Test_error.internal_error (Error.of_string "xyz"))
               ; soft_errors=
                   Error_accumulator.singleton
-                    (Test_error.raw_internal_error (Error.of_string "a")) }
+                    (Test_error.internal_error (Error.of_string "a")) }
           in
           [%test_eq: string inner] ~equal:(equal_inner String.equal) actual
             expected )
@@ -346,13 +349,12 @@ let%test_module "malleable error unit tests" =
             Result.fail
               { Hard_fail.hard_errors=
                   Error_accumulator.singleton
-                    (Test_error.raw_internal_error (Error.of_string "xyz"))
+                    (Test_error.internal_error (Error.of_string "xyz"))
               ; soft_errors=
                   { Error_accumulator.empty with
                     from_current_context=
-                      [ Test_error.raw_internal_error (Error.of_string "a")
-                      ; Test_error.raw_internal_error (Error.of_string "b") ]
-                  } }
+                      [ Test_error.internal_error (Error.of_string "a")
+                      ; Test_error.internal_error (Error.of_string "b") ] } }
           in
           [%test_eq: string inner] ~equal:(equal_inner String.equal) actual
             expected )

@@ -70,7 +70,6 @@ struct
   let blocks_to_be_produced n =
     let init state = Predicate_continuation state.blocks_generated in
     let check init_blocks_generated state =
-      Printf.printf !"%d\n%!" (state.blocks_generated - init_blocks_generated) ;
       if state.blocks_generated - init_blocks_generated >= n then
         Predicate_passed
       else Predicate_continuation init_blocks_generated

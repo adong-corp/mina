@@ -199,20 +199,20 @@ module Make (Engine : Intf.Engine.S) () :
            Deferred.return `Continue )) ;
     log_error_accumulator
 
-  let lift_accumulated_errors {warn; faulty_peer; error; fatal} =
+  let lift_accumulated_log_errors {warn; faulty_peer; error; fatal} =
+    let open Test_error in
     let lift error_array =
       DynArray.to_list error_array
       |> List.map ~f:(fun (node, message) ->
-             Test_error.Remote_error
-               {node_id= Node.id node; error_message= message} )
+             {node_id= Node.id node; error_message= message} )
     in
-    let soft_errors =
-      Test_error.Error_accumulator.of_contextualized_list "logs"
-        (lift warn @ lift faulty_peer)
+    let time_of_error {error_message; _} = error_message.timestamp in
+    let accumulate_errors =
+      List.fold ~init:Error_accumulator.empty ~f:(fun acc error ->
+          Error_accumulator.add_to_context acc error.node_id error
+            ~time_of_error )
     in
-    let hard_errors =
-      Test_error.Error_accumulator.of_contextualized_list "logs"
-        (lift error @ lift fatal)
-    in
-    {Test_error.Set.soft_errors; hard_errors}
+    let soft_errors = accumulate_errors (lift warn @ lift faulty_peer) in
+    let hard_errors = accumulate_errors (lift error @ lift fatal) in
+    {Set.soft_errors; hard_errors}
 end

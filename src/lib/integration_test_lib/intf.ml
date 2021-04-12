@@ -272,7 +272,8 @@ module Dsl = struct
       -> on_fatal_error:(Logger.Message.t -> unit)
       -> log_error_accumulator
 
-    val lift_accumulated_errors : log_error_accumulator -> Test_error.Set.t
+    val lift_accumulated_log_errors :
+      log_error_accumulator -> Test_error.remote_error Test_error.Set.t
   end
 end
 
