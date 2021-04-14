@@ -24,27 +24,39 @@ module Make (Inputs : Intf.Test.Inputs_intf) = struct
         ; {balance= "1000"; timing= Untimed} ]
     ; num_snark_workers= 0 }
 
-  let check_peer_connectivity all_peers (peer_id, visible_peers) =
+  let check_peer_connectivity ~nodes_by_peer_id ~peer_id ~connected_peers =
+    let get_node_id p =
+      p |> String.Map.find_exn nodes_by_peer_id |> Network.Node.id
+    in
     let expected_peers =
-      List.filter all_peers ~f:(fun p -> not (String.equal p peer_id))
+      nodes_by_peer_id |> String.Map.keys
+      |> List.filter ~f:(fun p -> not (String.equal p peer_id))
     in
     Malleable_error.List.iter expected_peers ~f:(fun p ->
         let error =
-          Printf.sprintf "peer %s is not connected to %s" peer_id p
+          Printf.sprintf "node %s (id=%s) is not connected to node %s (id=%s)"
+            (get_node_id peer_id) peer_id p (get_node_id p)
           |> Error.of_string
         in
         Malleable_error.ok_if_true
-          (List.mem visible_peers p ~equal:String.equal)
+          (List.mem connected_peers p ~equal:String.equal)
           ~error_type:`Hard ~error )
 
   let check_peers ~logger nodes =
     let open Malleable_error.Let_syntax in
-    let%bind query_results =
-      Malleable_error.List.map nodes ~f:(Network.Node.get_peer_id ~logger)
+    let%bind nodes_and_responses =
+      Malleable_error.List.map nodes ~f:(fun node ->
+          let%map response = Network.Node.get_peer_id ~logger node in
+          (node, response) )
     in
-    let all_peers, _ = List.unzip query_results in
-    Malleable_error.List.iter query_results
-      ~f:(check_peer_connectivity all_peers)
+    let nodes_by_peer_id =
+      nodes_and_responses
+      |> List.map ~f:(fun (node, (peer_id, _)) -> (peer_id, node))
+      |> String.Map.of_alist_exn
+    in
+    Malleable_error.List.iter nodes_and_responses
+      ~f:(fun (_, (peer_id, connected_peers)) ->
+        check_peer_connectivity ~nodes_by_peer_id ~peer_id ~connected_peers )
 
   let run network t =
     let open Network in

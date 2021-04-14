@@ -39,6 +39,16 @@ module Engine = struct
 
       val stop : t -> unit Malleable_error.t
 
+      val send_payment' :
+           ?retry_on_graphql_error:bool
+        -> logger:Logger.t
+        -> t
+        -> sender:Signature_lib.Public_key.Compressed.t
+        -> receiver:Signature_lib.Public_key.Compressed.t
+        -> amount:Currency.Amount.t
+        -> fee:Currency.Fee.t
+        -> unit Deferred.Or_error.t
+
       val send_payment :
            ?retry_on_graphql_error:bool
         -> logger:Logger.t
@@ -58,6 +68,8 @@ module Engine = struct
       val get_peer_id :
         logger:Logger.t -> t -> (string * string list) Malleable_error.t
 
+      val best_chain : logger:Logger.t -> t -> string list Malleable_error.t
+
       val dump_archive_data :
         logger:Logger.t -> t -> data_file:string -> unit Malleable_error.t
 
@@ -66,8 +78,6 @@ module Engine = struct
 
       val dump_precomputed_blocks :
         logger:Logger.t -> t -> unit Malleable_error.t
-
-      val best_chain : logger:Logger.t -> t -> string list Malleable_error.t
     end
 
     type t
