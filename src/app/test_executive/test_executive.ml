@@ -159,13 +159,18 @@ let report_test_errors ~log_error_set ~internal_error_set =
         false
   in
   Print.eprintf "\n" ;
-  if test_failed then (
-    color_eprintf Bash_colors.red
-      "The test has failed. See the above errors for details.\n\n" ;
-    return false )
-  else (
-    color_eprintf Bash_colors.green "The test has completed successfully.\n\n" ;
-    return true )
+  let result =
+    if test_failed then (
+      color_eprintf Bash_colors.red
+        "The test has failed. See the above errors for details.\n\n" ;
+      false )
+    else (
+      color_eprintf Bash_colors.green
+        "The test has completed successfully.\n\n" ;
+      true )
+  in
+  let%bind () = Writer.(flushed (Lazy.force stderr)) in
+  return result
 
 (* TODO: refactor cleanup system (smells like a monad for composing linear resources would help a lot) *)
 
